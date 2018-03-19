@@ -1,0 +1,786 @@
+
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include "semant.h"
+#include "utilities.h"
+
+
+extern int semant_debug;
+extern char *curr_filename;
+
+//////////////////////////////////////////////////////////////////////
+//
+// Symbols
+//
+// For convenience, a large number of symbols are predefined here.
+// These symbols include the primitive type and method names, as well
+// as fixed names used by the runtime system.
+//
+//////////////////////////////////////////////////////////////////////
+static Symbol 
+    arg,
+    arg2,
+    Bool,
+    concat,
+    cool_abort,
+    copy,
+    Int,
+    in_int,
+    in_string,
+    IO,
+    length,
+    Main,
+    main_meth,
+    No_class,
+    No_type,
+    Object,
+    out_int,
+    out_string,
+    prim_slot,
+    self,
+    SELF_TYPE,
+    Str,
+    str_field,
+    substr,
+    type_name,
+    val;
+//
+// Initializing the predefined symbols.
+//
+static void initialize_constants(void)
+{
+    arg         = idtable.add_string("arg");
+    arg2        = idtable.add_string("arg2");
+    Bool        = idtable.add_string("Bool");
+    concat      = idtable.add_string("concat");
+    cool_abort  = idtable.add_string("abort");
+    copy        = idtable.add_string("copy");
+    Int         = idtable.add_string("Int");
+    in_int      = idtable.add_string("in_int");
+    in_string   = idtable.add_string("in_string");
+    IO          = idtable.add_string("IO");
+    length      = idtable.add_string("length");
+    Main        = idtable.add_string("Main");
+    main_meth   = idtable.add_string("main");
+    //   _no_class is a symbol that can't be the name of any 
+    //   user-defined class.
+    No_class    = idtable.add_string("_no_class");
+    No_type     = idtable.add_string("_no_type");
+    Object      = idtable.add_string("Object");
+    out_int     = idtable.add_string("out_int");
+    out_string  = idtable.add_string("out_string");
+    prim_slot   = idtable.add_string("_prim_slot");
+    self        = idtable.add_string("self");
+    SELF_TYPE   = idtable.add_string("SELF_TYPE");
+    Str         = idtable.add_string("String");
+    str_field   = idtable.add_string("_str_field");
+    substr      = idtable.add_string("substr");
+    type_name   = idtable.add_string("type_name");
+    val         = idtable.add_string("_val");
+}
+
+static bool is_selftype(Symbol c){
+  return SELF_TYPE->equal_string(c->get_string(),c->get_len());
+}
+static bool is_selfobj(Symbol c){
+  return self->equal_string(c->get_string(),c->get_len());
+}
+static bool is_notype(Symbol c){
+  return No_type->equal_string(c->get_string(),c->get_len());
+} 
+
+ClassTable::ClassTable(Classes classes) : semant_errors(0) , error_stream(cerr) {
+
+  install_basic_classes();
+  for(unsigned i=classes->first();classes->more(i);i=classes->next(i)){
+    Class_ cls=classes->nth(i);
+    Symbol name=cls->get_name();
+    if(name==Object||name==SELF_TYPE||name==Int||name==Bool||name==IO||name==Str){
+      semant_error(cls);
+      err()<<"Redefination of existing class"<<endl;
+      cerr<<"Compilation halted due to static semantic errors."<<endl;
+      exit(1);
+    }
+    for(unsigned j=classes->first();j<i;j=classes->next(j)){
+      Class_ cls1=classes->nth(j);
+      if(cls->get_name()==cls1->get_name()){
+     semant_error(cls);
+      err()<<"Redefination of existing class"<<endl;
+      cerr<<"Compilation halted due to static semantic errors."<<endl;
+      exit(1);
+      }
+    }
+  }
+  for(unsigned int i=classes->first();classes->more(i);i=classes->next(i)){
+    Class_ cls=classes->nth(i);
+    if(classes->more(i)){
+      for(unsigned int j=classes->first();j<i;j=classes->next(j)){
+	Class_ cls2=classes->nth(j);
+	if(cls->get_name()==cls2->get_name()){
+	  semant_error(cls);
+	  err()<<"Redifination of class"<<endl;
+	  return;
+	}
+      }
+    }
+    add_class(cls,classes);
+  }
+  for(int i=classes->first();classes->more(i);i=classes->next(i)){
+    Class_ cls=classes->nth(i);
+    register_methods(cls);
+  }
+  Class_ m=find_class(Main);
+  if(!m){
+    semant_error();
+    err()<<"Class Main is not defined."<<endl;
+    return ;
+  }
+}
+
+void ClassTable::install_basic_classes() {
+
+    // The tree package uses these globals to annotate the classes built below.
+   // curr_lineno  = 0;
+    Symbol filename = stringtable.add_string("<basic class>");
+    
+    // The following demonstrates how to create dummy parse trees to
+    // refer to basic Cool classes.  There's no need for method
+    // bodies -- these are already built into the runtime system.
+    
+    // IMPORTANT: The results of the following expressions are
+    // stored in local variables.  You will want to do something
+    // with those variables at the end of this method to make this
+    // code meaningful.
+
+    // 
+    // The Object class has no parent class. Its methods are
+    //        abort() : Object    aborts the program
+    //        type_name() : Str   returns a string representation of class name
+    //        copy() : SELF_TYPE  returns a copy of the object
+    //
+    // There is no need for method bodies in the basic classes---these
+    // are already built in to the runtime system.
+
+    Class_ Object_class =
+	class_(Object, 
+	       No_class,
+	       append_Features(
+			       append_Features(
+					       single_Features(method(cool_abort, nil_Formals(), Object, no_expr())),
+					       single_Features(method(type_name, nil_Formals(), Str, no_expr()))),
+			       single_Features(method(copy, nil_Formals(), SELF_TYPE, no_expr()))),
+	       filename);
+    root=TableNode(Object_class);
+    Class_ self_class=class_(SELF_TYPE,Object,nil_Features(),filename);
+    add_class(self_class,NULL);
+
+
+    // 
+    // The IO class inherits from Object. Its methods are
+    //        out_string(Str) : SELF_TYPE       writes a string to the output
+    //        out_int(Int) : SELF_TYPE            "    an int    "  "     "
+    //        in_string() : Str                 reads a string from the input
+    //        in_int() : Int                      "   an int     "  "     "
+    //
+    Class_ IO_class = 
+	class_(IO, 
+	       Object,
+	       append_Features(
+			       append_Features(
+					       append_Features(
+							       single_Features(method(out_string, single_Formals(formal(arg, Str)),
+										      SELF_TYPE, no_expr())),
+							       single_Features(method(out_int, single_Formals(formal(arg, Int)),
+										      SELF_TYPE, no_expr()))),
+					       single_Features(method(in_string, nil_Formals(), Str, no_expr()))),
+			       single_Features(method(in_int, nil_Formals(), Int, no_expr()))),
+	       filename); 
+    add_class(IO_class,NULL); 
+
+    //
+    // The Int class has no methods and only a single attribute, the
+    // "val" for the integer. 
+    //
+    Class_ Int_class =
+	class_(Int, 
+	       Object,
+	       single_Features(attr(val, prim_slot, no_expr())),
+	       filename);
+    add_class(Int_class,NULL);
+
+    //
+    // Bool also has only the "val" slot.
+    //
+    Class_ Bool_class =
+	class_(Bool, Object, single_Features(attr(val, prim_slot, no_expr())),filename);
+    add_class(Bool_class,NULL);
+
+    //
+    // The class Str has a number of slots and operations:
+    //       val                                  the length of the string
+    //       str_field                            the string itself
+    //       length() : Int                       returns length of the string
+    //       concat(arg: Str) : Str               performs string concatenation
+    //       substr(arg: Int, arg2: Int): Str     substring selection
+    //       
+    Class_ Str_class =
+	class_(Str, 
+	       Object,
+	       append_Features(
+			       append_Features(
+					       append_Features(
+							       append_Features(
+									       single_Features(attr(val, Int, no_expr())),
+									       single_Features(attr(str_field, prim_slot, no_expr()))),
+							       single_Features(method(length, nil_Formals(), Int, no_expr()))),
+					       single_Features(method(concat, 
+								      single_Formals(formal(arg, Str)),
+								      Str, 
+								      no_expr()))),
+			       single_Features(method(substr, 
+						      append_Formals(single_Formals(formal(arg, Int)), 
+								     single_Formals(formal(arg2, Int))),
+						      Str, 
+						      no_expr()))),
+	       filename);
+    add_class(Str_class,NULL);
+    register_methods(Object_class);
+      register_methods(IO_class);
+      register_methods(Int_class);
+      register_methods(Bool_class);
+      register_methods(Str_class);
+}
+
+////////////////////////////////////////////////////////////////////
+//
+// semant_error is an overloaded function for reporting errors
+// during semantic analysis.  There are three versions:
+//
+//    ostream& ClassTable::semant_error()                
+//
+//    ostream& ClassTable::semant_error(Class_ c)
+//       print line number and filename for `c'
+//
+//    ostream& ClassTable::semant_error(Symbol filename, tree_node *t)  
+//       print a line number and filename
+//
+///////////////////////////////////////////////////////////////////
+
+ostream& ClassTable::semant_error(Class_ c)
+{                                                             
+    return semant_error(c->get_filename(),c);
+}    
+
+ostream& ClassTable::semant_error(Symbol filename, tree_node *t)
+{
+    error_stream << filename << ":" << t->get_line_number() << ": ";
+    return semant_error();
+}
+
+ostream& ClassTable::semant_error()                  
+{                                                 
+    semant_errors++;                            
+    return error_stream;
+} 
+
+
+
+/*   This is the entry point to the semantic checker.
+
+     Your checker should do the following two things:
+
+     1) Check that the program is semantically correct
+     2) Decorate the abstract syntax tree with type information
+        by setting the `type' field in each Expression node.
+        (see `tree.h')
+
+     You are free to first do 1), make sure you catch all semantic
+     errors. Part 2) can be done in a second stage, when you want
+     to build mycoolc.
+ */
+void program_class::semant()
+{
+    initialize_constants();
+
+    /* ClassTable constructor may do some semantic analysis */
+    ClassTable *classtable = new ClassTable(classes);
+    SymTable *symtable=new SymTable();
+    for(int i=classes->first();classes->more(i);i=classes->next(i)){
+      Class_ cls=classes->nth(i);
+      symtable->enterscope();
+      cls->build_env(classtable,symtable);
+      cls->semant(classtable,symtable);
+      symtable->exitscope();
+    }
+    /* some semantic analysis code may go here */
+
+    if (classtable->errors()) {
+	cerr << "Compilation halted due to static semantic errors." << endl;
+	exit(1);
+    }
+}
+
+void class__class::build_env(ClassTable *classtable,SymTable *symtable){
+  if(!classtable->is_root(get_parent())){
+    Class_ parent=classtable->find_class(get_parent());
+    parent->build_env(classtable,symtable);
+  }
+  for(int i=features->first();features->more(i);i=features->next(i)){
+    Feature f=features->nth(i);
+    f->build_env(classtable,symtable);
+  }
+}
+
+void class__class::semant(ClassTable *classtable,SymTable *symtable){
+  for(int i=features->first();features->more(i);i=features->next(i)){
+    Feature f=features->nth(i);
+    symtable->enterscope();
+    f->semant(classtable,symtable,name);
+    symtable->exitscope();
+  }
+}
+
+void method_class::build_env(ClassTable *classtable,SymTable *symtable){
+}
+
+void method_class::semant(ClassTable *classtable,SymTable *symtable,Symbol selftype){
+  symtable->enterscope();
+  for(int i=formals->first();formals->more(i);i=formals->next(i)){
+    Formal f=formals->nth(i);
+    Class_ type=classtable->find_class(f->get_type());
+    if(type==NULL)
+      classtable->semant_error();
+    else
+      symtable->addid(f->get_name(),type);
+  }
+  Symbol expr_ret_type=expr->check_type(classtable,symtable,selftype);
+  Symbol formal_ret_type=return_type;
+  if(expr_ret_type&&formal_ret_type){
+    Symbol ret1=(expr_ret_type==SELF_TYPE)?selftype:expr_ret_type;
+    Symbol ret2=(formal_ret_type==SELF_TYPE)?selftype:formal_ret_type;
+    if(!classtable->is_subtype(ret1,ret2)){
+      classtable->semant_error(classtable->find_class(selftype));
+      classtable->err()<<"Return type is not subtype as declared"<<endl;
+    }
+  }
+  if(return_type==SELF_TYPE&&expr_ret_type!=SELF_TYPE){
+    classtable->semant_error(classtable->find_class(selftype));
+    classtable->err()<<"Inferred return type of method does not conform to declared return type"<<endl;
+  }
+  symtable->exitscope();
+}
+
+Formals attr_class::get_formals(){
+  return nil_Formals();
+}
+
+void attr_class::build_env(ClassTable *classtable,SymTable *symtable){
+  Class_ type=classtable->find_class(get_type());
+  Class_ c=symtable->lookup(get_name());
+  if(c){
+    classtable->semant_error(type);
+    classtable->err()<<"Attribute has already defined in parent class"<<endl;
+    return;
+  }
+  symtable->addid(get_name(),type);
+}
+
+void attr_class::semant(ClassTable *classtable,SymTable *symtable,Symbol selftype){
+  if(is_selfobj(get_name())){
+    classtable->semant_error(classtable->find_class(selftype));
+    classtable->err()<<"Attribute name cannot be self"<<endl;
+  }
+  Symbol init_type=get_init()->check_type(classtable,symtable,selftype);
+  if(init_type==NULL)
+    return;
+  if(is_notype(init_type))
+    return;
+  if(!classtable->is_subtype(init_type,get_type())){
+    if(!(init_type==SELF_TYPE&&type_decl==selftype)){
+      classtable->semant_error(classtable->find_class(selftype));
+      classtable->err()<<"Type of init expression does not match attribute type"<<endl;
+    }
+  }
+}
+
+Symbol assign_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype){
+  type=NULL;
+  if(is_selfobj(name)){
+    classtable->semant_error(classtable->find_class(selftype));
+    classtable->err()<<"Cannot assign to self"<<endl;
+    return type;
+  }
+  Symbol t0=symtable->lookup(name)->get_name();
+  if(!t0){
+    classtable->semant_error(classtable->find_class(selftype));
+    classtable->err()<<"Type of initialization is invalid"<<endl;
+    return type;
+  }
+  Symbol t1=expr->check_type(classtable,symtable,selftype);
+  if(!t1){
+    classtable->semant_error(classtable->find_class(selftype));
+    classtable->err()<<"Type of initialization is invalid"<<endl;
+    return type;
+  }
+  if(classtable->is_subtype(t1,t0))
+    type=t1;
+  else
+    {
+      classtable->semant_error(classtable->find_class(selftype));
+      classtable->err()<<"Type of init is not subtype of identifier"<<endl;
+    }
+  return type;
+}
+
+Symbol static_dispatch_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype){
+  Symbol t0=expr->check_type(classtable,symtable,selftype);
+  if(is_selftype(t0))
+    t0=selftype;
+  Class_ cls=classtable->find_class(t0);
+  for(int i=actual->first();actual->more(i);i=actual->next(i)){
+    Expression e=actual->nth(i);
+    Symbol arg_type=e->check_type(classtable,symtable,selftype);
+    Symbol std_type=classtable->find_fun_arg_type(cls,name,i);
+    if(!classtable->is_subtype(t0,type_name)){
+      classtable->semant_error();
+      type=NULL;
+      return type;
+    }
+    if(arg_type&&std_type){
+      if(!classtable->is_subtype(arg_type,std_type))
+	classtable->semant_error();
+    }
+    else
+      {
+	classtable->semant_error();
+      }
+  }
+  Symbol ret_type=classtable->find_ret_type(cls,name);
+  if(ret_type==NULL)
+    {
+      classtable->semant_error(classtable->find_class(selftype));
+      classtable->err()<<"Static dispatch to undefined method"<<endl;
+      type=NULL;
+      return type;
+    }
+  if(is_selftype(ret_type))
+    type=t0;
+  else
+    type=ret_type;
+  return type;
+}
+
+Symbol dispatch_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype){
+  Symbol t0=expr->check_type(classtable,symtable,selftype);
+  Symbol real_t0=t0;
+  if(is_selftype(real_t0))
+    real_t0=selftype;
+  Class_ cls=classtable->find_class(real_t0);
+  for(int i=actual->first();actual->more(i);i=actual->next(i)){
+    Expression e=actual->nth(i);
+    Symbol arg_type=e->check_type(classtable,symtable,selftype);
+    if(is_selftype(arg_type))
+      arg_type=selftype;
+    Symbol std_type=classtable->find_fun_arg_type(cls,name,i);
+    if(arg_type && std_type){
+      if(!classtable->is_subtype(arg_type,std_type)){
+	classtable->semant_error(classtable->find_class(selftype));
+	classtable->err()<<"Argument type does not match the declared type"<<endl;
+      }
+    } else {
+      classtable->semant_error(classtable->find_class(selftype));
+      classtable->err()<<"Argument type or declared type is invalid"<<endl;
+    }
+  }
+  Symbol ret_type=classtable->find_ret_type(cls,name);
+  if(ret_type==NULL){
+    classtable->semant_error(classtable->find_class(selftype));
+    classtable->err()<<"Dispatch to undefined method"<<endl;
+    type=NULL;
+    return type;
+  }
+  if(is_selftype(ret_type))
+    type=t0;
+  else
+    type=ret_type;
+  return type;
+}
+
+Symbol cond_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype){
+  Symbol t1=pred->check_type(classtable,symtable,selftype);
+  if(t1==Bool){
+    Symbol t2=then_exp->check_type(classtable,symtable,selftype);
+      Symbol t3=else_exp->check_type(classtable,symtable,selftype);
+      type=classtable->lub(t2,t3)->get_name();
+  }
+  else
+    {
+      type=NULL;
+      classtable->semant_error(classtable->find_class(selftype));
+      classtable->err()<<"If predicator is not Bool"<<endl;
+    }
+  return type;
+}
+
+Symbol loop_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype){
+  Symbol t1=pred->check_type(classtable,symtable,selftype);
+  if(t1==Bool){
+    body->check_type(classtable,symtable,selftype);
+    type=Object;
+  } else {
+    type=NULL;
+    classtable->semant_error(classtable->find_class(selftype));
+    classtable->err()<<"Loop predicator is  not Bool"<<endl;
+  }
+  return type;
+}
+
+Symbol typcase_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype){
+  Symbol t0=expr->check_type(classtable,symtable,selftype);
+  Symbol return_type=NULL;
+  for(int i=cases->first();cases->more(i);i=cases->next(i)){
+    Case c=cases->nth(i);
+    for(int j=cases->first();j<i;j=cases->next(j)){
+      Case c1=cases->nth(j);
+      if(c->get_type()==c1->get_type()){
+	type=NULL;
+	classtable->semant_error(classtable->find_class(selftype));
+	classtable->err()<<"Duplicate branch in case statement"<<endl;
+	return type;
+      }
+    }
+    symtable->enterscope();
+    Class_ cls=classtable->find_class(c->get_type());
+    symtable->addid(c->get_name(),cls);
+    Symbol t=c->get_expr()->check_type(classtable,symtable,selftype);
+    symtable->exitscope();
+    if(return_type)
+      return_type=classtable->lub(return_type,t)->get_name();
+    else
+      return_type=t;
+  }
+  type=return_type;
+  return type;
+}
+
+Symbol block_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype){
+  for(int i=body->first();body->more(i);i=body->next(i)){
+    Expression e=body->nth(i);
+    type=e->check_type(classtable,symtable,selftype);
+  }
+  return type;
+}
+
+Symbol let_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype){
+  if(is_selfobj(identifier)){
+    type=NULL;
+    classtable->semant_error(classtable->find_class(selftype));
+    classtable->err()<<"'self' cannot be bound in a 'let' expression"<<endl;
+    return type;
+  }
+  Symbol t0=classtable->find_class(type_decl)->get_name();
+  Symbol t1=init->check_type(classtable,symtable,selftype);
+  if(t1==No_type)
+    t1=t0;
+  if(!classtable->is_subtype(t1,t0)){
+    type=NULL;
+    classtable->semant_error(classtable->find_class(selftype));
+    classtable->err()<<"Type of init is not subtype of identifier"<<endl;
+  } else {
+    symtable->enterscope();
+    symtable->addid(identifier,classtable->find_class(t0));
+    type=body->check_type(classtable,symtable,selftype);
+    symtable->exitscope();
+  }
+  return type;
+}
+
+Symbol plus_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype)
+{
+  Symbol t1=e1->check_type(classtable,symtable,selftype);
+  Symbol t2=e2->check_type(classtable,symtable,selftype);
+  if(t1==t2&&t1==Int){
+    type=Int;
+  }
+  else
+    {
+      type=NULL;
+      classtable->semant_error(classtable->find_class(selftype));
+      classtable->err()<<"Types of both sides of operator must be Int"<<endl;
+    }
+  return type;
+}
+Symbol sub_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype)
+{
+  Symbol t1=e1->check_type(classtable,symtable,selftype);
+  Symbol t2=e2->check_type(classtable,symtable,selftype);
+  if(t1==t2&&t1==Int){
+    type=Int;
+  }
+  else
+    {
+      type=NULL;
+      classtable->semant_error(classtable->find_class(selftype));
+      classtable->err()<<"Types of both sides of operator must be Int"<<endl;
+    }
+  return type;
+}
+Symbol mul_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype)
+{
+  Symbol t1=e1->check_type(classtable,symtable,selftype);
+  Symbol t2=e2->check_type(classtable,symtable,selftype);
+  if(t1==t2&&t1==Int){
+    type=Int;
+  }
+  else
+    {
+      type=NULL;
+      classtable->semant_error(classtable->find_class(selftype));
+      classtable->err()<<"Types of both sides of operator must be Int"<<endl;
+    }
+  return type;
+}
+Symbol divide_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype)
+{
+  Symbol t1=e1->check_type(classtable,symtable,selftype);
+  Symbol t2=e2->check_type(classtable,symtable,selftype);
+  if(t1==t2&&t1==Int){
+    type=Int;
+  }
+  else
+    {
+      type=NULL;
+      classtable->semant_error(classtable->find_class(selftype));
+      classtable->err()<<"Types of both sides of operator must be Int"<<endl;
+    }
+  return type;
+}
+
+Symbol neg_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype)
+{
+  Symbol t1=e1->check_type(classtable,symtable,selftype);
+  //Symbol t2=e2->check_type(classtable,symtable,selftype);
+  if(t1==Int){
+    type=Int;
+  }
+  else
+    {
+      type=NULL;
+      classtable->semant_error(classtable->find_class(selftype));
+      classtable->err()<<"Types of both sides of operator must be Int"<<endl;
+    }
+  return type;
+}
+
+Symbol eq_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype)
+{
+  Symbol t1=e1->check_type(classtable,symtable,selftype);
+  Symbol t2=e2->check_type(classtable,symtable,selftype);
+  if(t1==t2&&(t1==Int||t1==Bool||t1==Str)){
+    type=Bool;
+  }
+  else if(t1!=Int&&t2!=Bool &&t1!=Str&&t2!=Int&&t2!=Bool&&t2!=Str){
+    type=Bool;
+  }
+  else
+    {
+      type=NULL;
+      classtable->semant_error(classtable->find_class(selftype));
+      classtable->err()<<"Types of both sides of operator must be Int"<<endl;
+    }
+  return type;
+}
+Symbol lt_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype)
+{
+  Symbol t1=e1->check_type(classtable,symtable,selftype);
+  Symbol t2=e2->check_type(classtable,symtable,selftype);
+  if(t1==t2&&t1==Int){
+    type=Bool;
+  }
+  else
+    {
+      type=NULL;
+      classtable->semant_error(classtable->find_class(selftype));
+      classtable->err()<<"Types of both sides of operator must be Int"<<endl;
+    }
+  return type;
+}
+
+Symbol leq_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype)
+{
+  Symbol t1=e1->check_type(classtable,symtable,selftype);
+  Symbol t2=e2->check_type(classtable,symtable,selftype);
+  if(t1==t2&&t1==Int){
+    type=Bool;
+  }
+  else
+    {
+      type=NULL;
+      classtable->semant_error(classtable->find_class(selftype));
+      classtable->err()<<"Types of both sides of operator must be Int"<<endl;
+    }
+  return type;
+}
+Symbol comp_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype)
+{
+  Symbol t1=e1->check_type(classtable,symtable,selftype);
+  // Symbol t2=e2->check_type(classtable,symtable,selftype);
+  if(t1==Bool){
+    type=Bool;
+  }
+  else
+    {
+      type=NULL;
+      classtable->semant_error(classtable->find_class(selftype));
+      classtable->err()<<"Types of both sides of operator must be Int"<<endl;
+    }
+  return type;
+}
+
+Symbol int_const_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype){
+  type=Int;
+  return type;
+}
+Symbol bool_const_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype){
+  type=Bool;
+  return type;
+}
+Symbol string_const_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype){
+  type=Str;
+  return type;
+}
+Symbol isvoid_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype){
+  e1->check_type(classtable,symtable,selftype);
+  type=Bool;
+  return type;
+}
+Symbol new__class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype){
+  Symbol t=type_name;
+  if(t!=SELF_TYPE&&!classtable->find_class(t)){
+    classtable->semant_error(classtable->find_class(selftype));
+    classtable->err()<<"Type of new object is invalid"<<endl;
+    t=NULL;
+  }
+  type=t;
+  return t;
+}
+
+Symbol object_class::check_type(ClassTable *classtable,SymTable *symtable,Symbol selftype){
+  if(name->equal_string(self->get_string(),self->get_len())){
+    type=SELF_TYPE;
+    return type;
+  }
+  Class_ t=symtable->lookup(name);
+  if(t){
+    type=t->get_name();
+    return type;
+  }
+  else{
+    classtable->semant_error(classtable->find_class(selftype));
+    classtable->err()<<"Undeclared identifier"<<endl;
+    return NULL;
+  }
+}
+
