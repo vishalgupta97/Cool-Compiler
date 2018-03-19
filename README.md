@@ -1,5 +1,5 @@
 # Cool-Compiler
-----------
+
 This is an implementation of a compiler for COOL programming language.
 It was implemented as part of Online Stanford Course on Compilers [https://lagunita.stanford.edu/courses/Engineering/Compilers/Fall2014/about]
 
